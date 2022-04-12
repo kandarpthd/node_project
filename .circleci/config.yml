@@ -1,26 +1,114 @@
-# Use the latest 2.1 version of CircleCI pipeline process engine.
-# See: https://circleci.com/docs/2.0/configuration-reference
-version: 2.1
+docker-container: &container
+  - image: cimg/node:lts
 
-# Define a job to be invoked later in a workflow.
-# See: https://circleci.com/docs/2.0/configuration-reference/#jobs
+image: &image
+  image: ubuntu-2004:202107-02
+
+version: 2.1
 jobs:
-  say-hello:
-    # Specify the execution environment. You can specify an image from Dockerhub or use one of our Convenience Images from CircleCI's Developer Hub.
-    # See: https://circleci.com/docs/2.0/configuration-reference/#docker-machine-macos-windows-executor
-    docker:
-      - image: cimg/base:stable
-    # Add steps to the job
-    # See: https://circleci.com/docs/2.0/configuration-reference/#steps
+  install-dependencies:
+    docker: *container
     steps:
       - checkout
+      - restore_cache:
+          keys:
+            - yarn-packages-{{ .Environment.CIRCLE_BRANCH }}-{{ checksum "yarn.lock" }}
+            - yarn-packages-{{ .Environment.CIRCLE_BRANCH }}-
+            - yarn-packages-
+      - run: yarn cache clean
+      - run: yarn --offline --frozen-lockfile
+      - save_cache:
+          key: yarn-packages-{{ .Environment.CIRCLE_BRANCH }}-{{ checksum "yarn.lock" }}
+          paths:
+            - node_modules
+      - persist_to_workspace:
+          root: .
+          paths:
+            - node_modules
+  build:
+    docker: *container
+    steps:
+      - checkout
+      - attach_workspace:
+          at: .
       - run:
-          name: "Say hello"
-          command: "echo Hello, World!"
-
-# Invoke jobs via workflows
-# See: https://circleci.com/docs/2.0/configuration-reference/#workflows
+          command: |
+            if [ -f .gitattributes ]; then
+              if grep -q "filter=lfs" .gitattributes; then
+                wget https://github.com/git-lfs/git-lfs/releases/download/v2.6.1/git-lfs-linux-amd64-v2.6.1.tar.gz
+                tar -xzf git-lfs-linux-amd64-v2.6.1.tar.gz git-lfs
+                sudo mv git-lfs /usr/local/bin/
+                rm -f git-lfs-linux-amd64-v2.6.1.tar.gz
+                git lfs install
+                git lfs pull
+              fi
+            fi
+      - run: yarn build
+      - persist_to_workspace:
+          root: .
+          paths:
+            - build
+  docker-publish-dev:
+    machine: *image
+    steps:
+      - checkout
+      - attach_workspace:
+          at: .
+      - run:
+          command: |
+            echo "${GCP_KEY_NP_FASTERBIRDS_SANDBOX}" > /tmp/gcp-key.json
+            gcloud -q config set project np-fasterbids-sandbox-thd
+            gcloud auth activate-service-account --key-file /tmp/gcp-key.json
+            gcloud auth configure-docker --quiet
+      - run: docker build --tag gcr.io/np-fasterbids-sandbox-thd/${CIRCLE_PROJECT_REPONAME}:$(echo ${CIRCLE_SHA1} | cut -c -7) .
+      - run: docker push gcr.io/np-fasterbids-sandbox-thd/${CIRCLE_PROJECT_REPONAME}:$(echo ${CIRCLE_SHA1} | cut -c -7)
+      - run:
+          command: |
+            gcloud container images add-tag gcr.io/np-fasterbids-sandbox-thd/${CIRCLE_PROJECT_REPONAME}:$(echo ${CIRCLE_SHA1} | cut -c -7) \
+              gcr.io/np-fasterbids-sandbox-thd/${CIRCLE_PROJECT_REPONAME}:$(echo ${CIRCLE_SHA1} | cut -c -7)-branch-`echo ${CIRCLE_BRANCH} | sed -e 's/[^a-zA-Z0-9\-]/-/g'`
+      - run:
+          command: |
+            if ! [[ "$CIRCLE_BRANCH" = "master" || "$CIRCLE_BRANCH" = "main" ]]; then
+              gcloud container images add-tag gcr.io/np-fasterbids-sandbox-thd/${CIRCLE_PROJECT_REPONAME}:$(echo ${CIRCLE_SHA1} | cut -c -7) \
+                gcr.io/np-fasterbids-sandbox-thd/${CIRCLE_PROJECT_REPONAME}:$(echo ${CIRCLE_SHA1} | cut -c -7)-pr-`echo ${CIRCLE_PULL_REQUEST} | grep -om1 '[0-9]\+$'`
+            fi
+  docker-publish-staging:
+    machine: *image
+    steps:
+      - checkout
+      - attach_workspace:
+          at: .
+      - run:
+          command: |
+            echo "${GCP_KEY_NP_QUOTECENTER}" > /tmp/gcp-key.json
+            gcloud -q config set project np-quotecenter
+            gcloud auth activate-service-account --key-file /tmp/gcp-key.json
+            gcloud auth configure-docker --quiet
+      - run: docker build --tag gcr.io/np-quotecenter/${CIRCLE_PROJECT_REPONAME}:$(echo ${CIRCLE_SHA1} | cut -c -7) .
+      - run: docker push gcr.io/np-quotecenter/${CIRCLE_PROJECT_REPONAME}:$(echo ${CIRCLE_SHA1} | cut -c -7)
+      - run:
+          command: |
+            if [[ "$CIRCLE_BRANCH" = "master" || "$CIRCLE_BRANCH" = "main" ]]; then
+              gcloud container images add-tag gcr.io/np-quotecenter/${CIRCLE_PROJECT_REPONAME}:$(echo ${CIRCLE_SHA1} | cut -c -7) \
+                gcr.io/np-quotecenter/${CIRCLE_PROJECT_REPONAME}:$(echo ${CIRCLE_SHA1} | cut -c -7)-branch-`echo ${CIRCLE_BRANCH} | sed -e 's/[^a-zA-Z0-9\-]/-/g'`
+            else
+              gcloud container images add-tag gcr.io/np-quotecenter/${CIRCLE_PROJECT_REPONAME}:$(echo ${CIRCLE_SHA1} | cut -c -7) \
+                gcr.io/np-quotecenter/${CIRCLE_PROJECT_REPONAME}:$(echo ${CIRCLE_SHA1} | cut -c -7)-pr-`echo ${CIRCLE_PULL_REQUEST} | grep -om1 '[0-9]\+$'`
+            fi
 workflows:
-  say-hello-workflow:
+  commit:
     jobs:
-      - say-hello
+      - install-dependencies:
+          context: quotecenter
+      - build:
+          context: quotecenter
+          requires:
+            - install-dependencies
+      - docker-publish-dev:
+          context: quotecenter
+          requires:
+            - build
+      - docker-publish-staging:
+          context: quotecenter
+          requires:
+            - build
