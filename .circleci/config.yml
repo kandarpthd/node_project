@@ -9,11 +9,6 @@ jobs:
   install-dependencies:
     docker: *container
     steps:
-      - restore_cache:
-          keys:
-            - v1-npm-deps-{{ .Branch }}-{{ checksum "package-lock.json" }}
-            - v1-npm-deps-{{ .Branch }}
-            - v1-npm-deps
       - run:
           name: install dependencies
           command: npm i
