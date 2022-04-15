@@ -9,22 +9,21 @@ jobs:
   install-dependencies:
     docker: *container
     steps:
-      - checkout
       - restore_cache:
           keys:
-            - yarn-packages-{{ .Environment.CIRCLE_BRANCH }}-{{ checksum "yarn.lock" }}
-            - yarn-packages-{{ .Environment.CIRCLE_BRANCH }}-
-            - yarn-packages-
-      - run: yarn cache clean
-      - run: yarn --offline --frozen-lockfile
+            - v1-npm-deps-{{ .Branch }}-{{ checksum "package-lock.json" }}
+            - v1-npm-deps-{{ .Branch }}
+            - v1-npm-deps
+      - run:
+          name: install dependencies
+          command: npm i
       - save_cache:
-          key: yarn-packages-{{ .Environment.CIRCLE_BRANCH }}-{{ checksum "yarn.lock" }}
+          key: v1-npm-deps-{{ .Branch }}-{{ checksum "package-lock.json" }}
           paths:
             - node_modules
-      - persist_to_workspace:
-          root: .
-          paths:
-            - node_modules
+      - run:
+          name: run unit tests
+          command: npm test
   build:
     docker: *container
     steps:
